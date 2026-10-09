@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenCoze - 现代化 AI 工作流可视化编排平台</title>
+  <!-- Tailwind CSS & Lucide Icons via CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+  <style>
+    /* 优雅网格背景 */
+    .bg-grid {
+      background-size: 24px 24px;
+      background-image: radial-gradient(circle, #cbd5e1 1px, transparent 1px);
+    }
+    /* 节点动画效果 */
+    .node-running {
+      animation: pulse-border 1.5s infinite;
+    }
+    @keyframes pulse-border {
+      0% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.6); }
+      70% { box-shadow: 0 0 0 10px rgba(59, 130, 246, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
+    }
+    /* 隐藏滚动条 */
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-800 h-screen w-screen overflow-hidden flex flex-col font-sans">
+
+  <!-- 1. 顶部全局导航栏 -->
+  <header class="h-14 bg-white border-b border-slate-200 px-4 flex items-center justify-between z-20 shadow-sm shrink-0">
+    <div class="flex items-center space-x-3">
+      <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-indigo-600 via-blue-600 to-cyan-500 flex items-center justify-center text-white shadow-md shadow-blue-500/20">
+        <i class="fa-solid fa-diagram-project text-base"></i>
+      </div>
+      <div>
+        <div class="flex items-center space-x-2">
+          <span class="font-extrabold text-base tracking-tight bg-gradient-to-r from-slate-900 to-indigo-800 bg-clip-text text-transparent">OpenCoze</span>
+          <span class="text-[11px] font-semibold uppercase bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-full border border-indigo-200/60">Studio v1.0</span>
+        </div>
+        <div class="text-[11px] text-slate-400">轻量级 AI 工作流编排与调试引擎</div>
+      </div>
+    </div>
+
+    <!-- 中部：模板切换中心 -->
+    <div class="flex items-center space-x-2 bg-slate-100 p-1 rounded-xl border border-slate-200/80">
+      <span class="text-xs text-slate-500 font-medium pl-2"><i class="fa-solid fa-layer-group mr-1 text-slate-400"></i>模板:</span>
+      <select id="templateSelector" onchange="loadSelectedTemplate()" class="bg-white text-xs font-semibold text-slate-700 py-1 px-3 rounded-lg border-0 shadow-sm outline-none cursor-pointer hover:bg-slate-50 transition">
+        <option value="competitor_analysis">📊 标杆竞品深度商业研报流</option>
+        <option value="ticket_router">🛡️ 客诉意图智能分类与自动分流流</option>
+        <option value="knowledge_rag">📚 知识库 RAG 严谨问答流</option>
+      </select>
+    </div>
+
+    <!-- 右侧：环境状态与主操作按钮 -->
+    <div class="flex items-center space-x-3">
+      <div id="llmBadge" class="hidden sm:flex items-center space-x-1.5 px-2.5 py-1 bg-emerald-50 text-emerald-700 text-xs font-medium rounded-lg border border-emerald-200/80">
+        <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+        <span id="llmProviderName">大模型加载中...</span>
+      </div>
+
+      <button onclick="openAddNodeModal()" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-medium rounded-lg border border-slate-200 transition flex items-center space-x-1">
+        <i class="fa-solid fa-plus text-[10px]"></i>
+        <span>添加节点</span>
+      </button>
+
+      <button onclick="exportWorkflowJson()" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-medium rounded-lg border border-slate-200 transition flex items-center space-x-1" title="导出 DSL JSON">
+        <i class="fa-solid fa-download text-[10px]"></i>
+        <span>导出</span>
+      </button>
+
+      <button id="runBtn" onclick="runWorkflow()" class="px-4 py-1.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white text-xs font-semibold rounded-lg shadow-sm shadow-blue-500/20 transition flex items-center space-x-1.5">
+        <i id="runIcon" class="fa-solid fa-play text-[10px]"></i>
+        <span id="runText">运行工作流</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- 2. 主体工作区：左侧可视化画布 + 右侧执行追踪面板 -->
+  <div class="flex-1 flex overflow-hidden relative">
+
+    <!-- A. 画布区域 -->
+    <div id="canvasContainer" class="flex-1 relative overflow-auto bg-grid select-none cursor-grab active:cursor-grabbing">
+      <!-- 动态 SVG 贝塞尔曲线连线层 -->
+      <svg id="connectionSvg" class="absolute inset-0 pointer-events-none w-[3000px] h-[3000px] z-0">
+        <defs>
+          <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="#94a3b8" />
+          </marker>
+          <marker id="arrowhead-true" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="#10b981" />
+          </marker>
+          <marker id="arrowhead-false" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="#f59e0b" />
+          </marker>
+        </defs>
+      </svg>
+
+      <!-- 节点卡片容器 -->
+      <div id="nodesLayer" class="relative w-[3000px] h-[3000px] z-10"></div>
+    </div>
+
+    <!-- B. 右侧调试与运行追踪抽屉 (Run Inspector Drawer) -->
+    <aside id="inspectorDrawer" class="w-96 bg-white border-l border-slate-200 flex flex-col z-20 shadow-lg shrink-0 transition-all duration-300">
+      
+      <!-- 抽屉顶部选项卡 -->
+      <div class="h-11 border-b border-slate-200 px-3 flex items-center justify-between bg-slate-50/60">
+        <div class="flex space-x-1">
+          <button id="tabBtnInputs" onclick="switchInspectorTab('inputs')" class="px-3 py-1 text-xs font-semibold rounded-md bg-white text-indigo-600 shadow-sm border border-slate-200/80">
+            <i class="fa-solid fa-sliders mr-1 text-[11px]"></i>输入入参
+          </button>
+          <button id="tabBtnTraces" onclick="switchInspectorTab('traces')" class="px-3 py-1 text-xs font-medium rounded-md text-slate-600 hover:text-slate-900">
+            <i class="fa-solid fa-timeline mr-1 text-[11px]"></i>执行追溯
+          </button>
+          <button id="tabBtnResult" onclick="switchInspectorTab('result')" class="px-3 py-1 text-xs font-medium rounded-md text-slate-600 hover:text-slate-900">
+            <i class="fa-solid fa-file-lines mr-1 text-[11px]"></i>最终产出
+          </button>
+        </div>
+      </div>
+
+      <!-- 选项卡 1：运行参数输入区 -->
+      <div id="tabContentInputs" class="flex-1 p-4 overflow-y-auto space-y-4">
+        <div class="flex items-center justify-between pb-2 border-b border-slate-100">
+          <h3 class="text-xs font-bold text-slate-700 uppercase tracking-wider">Start 节点启动入参</h3>
+          <span class="text-[11px] text-slate-400">参数将注入 {{start.xxx}}</span>
+        </div>
+        <div id="dynamicInputsContainer" class="space-y-3">
+          <!-- 动态表单 -->
+        </div>
+        <div class="pt-2">
+          <button onclick="runWorkflow()" class="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold shadow-sm transition flex items-center justify-center space-x-1.5">
+            <i class="fa-solid fa-bolt"></i>
+            <span>以当前参数启动工作流</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- 选项卡 2：全链路 Trace 追溯视图 -->
+      <div id="tabContentTraces" class="hidden flex-1 p-4 overflow-y-auto space-y-3">
+        <div class="flex items-center justify-between pb-2 border-b border-slate-100">
+          <div>
+            <h3 class="text-xs font-bold text-slate-700 uppercase tracking-wider">节点执行时序 (Timeline)</h3>
+            <p id="overallMetrics" class="text-[11px] text-slate-400">等待工作流运行...</p>
+          </div>
+        </div>
+        <div id="tracesTimeline" class="space-y-2">
+          <div class="text-center py-12 text-slate-400 text-xs">
+            <i class="fa-solid fa-circle-play text-2xl text-slate-300 mb-2 block"></i>
+            点击顶部「运行工作流」后在此查看全链路 Trace
+          </div>
+        </div>
+      </div>
+
+      <!-- 选项卡 3：最终产出结果 -->
+      <div id="tabContentResult" class="hidden flex-1 p-4 overflow-y-auto flex flex-col space-y-3">
+        <div class="flex items-center justify-between pb-2 border-b border-slate-100">
+          <h3 class="text-xs font-bold text-slate-700 uppercase tracking-wider">最终结果 (Markdown)</h3>
+          <button onclick="copyResultText()" class="text-xs text-indigo-600 hover:text-indigo-800 font-medium">
+            <i class="fa-regular fa-copy mr-1"></i>复制
+          </button>
+        </div>
+        <div id="finalOutputContainer" class="flex-1 bg-slate-50 p-3 rounded-lg border border-slate-200 text-xs text-slate-700 prose prose-slate max-w-none overflow-y-auto">
+          <div class="text-center py-12 text-slate-400">
+            <i class="fa-solid fa-file-waveform text-2xl text-slate-300 mb-2 block"></i>
+            工作流执行完成后在此渲染最终结果
+          </div>
+        </div>
+      </div>
+
+    </aside>
+  </div>
+
+  <!-- 3. 节点详情配置抽屉 (Node Property Modal) -->
+  <div id="nodeDetailModal" class="hidden fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-lg overflow-hidden flex flex-col max-h-[85vh]">
+      <div class="h-12 border-b border-slate-200 px-4 flex items-center justify-between bg-slate-50">
+        <div class="flex items-center space-x-2">
+          <span id="modalNodeIcon" class="w-6 h-6 rounded-md bg-indigo-100 text-indigo-600 flex items-center justify-center text-xs"></span>
+          <h3 id="modalNodeTitle" class="text-xs font-bold text-slate-800">节点属性配置</h3>
+        </div>
+        <button onclick="closeNodeDetailModal()" class="text-slate-400 hover:text-slate-600 text-sm">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+
+      <div id="modalNodeBody" class="p-5 overflow-y-auto flex-1 space-y-4 text-xs">
+        <!-- 动态配置表单 -->
+      </div>
+
+      <div class="h-12 border-t border-slate-200 px-4 bg-slate-50 flex items-center justify-between">
+        <button onclick="deleteCurrentNode()" class="text-red-500 hover:text-red-700 text-xs font-semibold">
+          <i class="fa-regular fa-trash-can mr-1"></i>删除节点
+        </button>
+        <button onclick="saveNodeConfig()" class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold shadow-sm transition">
+          保存配置
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4. 前端交互核心脚本 -->
+  <script>
+    // 全局当前工作流 DSL 状态
+    let currentWorkflow = null;
+    let selectedNodeId = null;
+    let currentTraces = {};
+
+    // 节点类型图标与徽章配色规范
+    const NODE_TYPE_META = {
+      start: { label: "开始输入", icon: "fa-play", color: "bg-emerald-500", border: "border-emerald-200", badge: "bg-emerald-50 text-emerald-700" },
+      end: { label: "结果输出", icon: "fa-flag-checkered", color: "bg-rose-500", border: "border-rose-200", badge: "bg-rose-50 text-rose-700" },
+      llm: { label: "大模型推理", icon: "fa-robot", color: "bg-blue-600", border: "border-blue-200", badge: "bg-blue-50 text-blue-700" },
+      code: { label: "Python脚本", icon: "fa-code", color: "bg-amber-500", border: "border-amber-200", badge: "bg-amber-50 text-amber-700" },
+      condition: { label: "条件路由", icon: "fa-code-branch", color: "bg-purple-600", border: "border-purple-200", badge: "bg-purple-50 text-purple-700" },
+      tool: { label: "API插件", icon: "fa-wrench", color: "bg-cyan-600", border: "border-cyan-200", badge: "bg-cyan-50 text-cyan-700" },
+      knowledge: { label: "向量知识库", icon: "fa-book-bookmark", color: "bg-indigo-600", border: "border-indigo-200", badge: "bg-indigo-50 text-indigo-700" },
+    };
+
+    // 页面初始化
+    document.addEventListener("DOMContentLoaded", async () => {
+      await fetchSystemInfo();
+      await loadSelectedTemplate();
+    });
+
+    async function fetchSystemInfo() {
+      try {
+        const res = await fetch("/api/info");
+        const data = await res.json();
+        document.getElementById("llmProviderName").innerText = data.provider || "GLM-4-Flash";
+        document.getElementById("llmBadge").classList.remove("hidden");
+      } catch (e) {
+        console.error("加载系统状态失败", e);
+      }
+    }
+
+    async function loadSelectedTemplate() {
+      const templateKey = document.getElementById("templateSelector").value;
+      try {
+        const res = await fetch(`/api/template/${templateKey}`);
+        currentWorkflow = await res.json();
+        renderWorkflowCanvas();
+        renderDynamicInputs();
+        resetTracesView();
+      } catch (e) {
+        alert("加载模板失败：" + e);
+      }
+    }
+
+    // 渲染拓扑画布与节点卡片
+    function renderWorkflowCanvas() {
+      const layer = document.getElementById("nodesLayer");
+      layer.innerHTML = "";
+
+      if (!currentWorkflow || !currentWorkflow.nodes) return;
+
+      // 自动计算水平层级拓扑位置
+      const layoutPositions = calculateAutoLayout(currentWorkflow);
+
+      currentWorkflow.nodes.forEach(node => {
+        const meta = NODE_TYPE_META[node.type] || { label: "自定义", icon: "fa-cube", color: "bg-slate-600", border: "border-slate-200", badge: "bg-slate-50 text-slate-700" };
+        const pos = layoutPositions[node.id] || { x: 50, y: 150 };
+
+        const nodeEl = document.createElement("div");
+        nodeEl.id = `node-${node.id}`;
+        nodeEl.className = `absolute w-64 bg-white rounded-xl shadow-md border ${meta.border} p-3 transition duration-200 hover:shadow-lg cursor-pointer z-10`;
+        nodeEl.style.left = `${pos.x}px`;
+        nodeEl.style.top = `${pos.y}px`;
+        nodeEl.onclick = () => openNodeDetail(node.id);
+
+        let previewText = "";
+        if (node.type === "llm") previewText = `Model: ${node.config?.model || 'glm-4-flash'}`;
+        else if (node.type === "code") previewText = `Python main(inputs)`;
+        else if (node.type === "condition") previewText = `${node.config?.left_var || ''} ${node.config?.operator || '=='} ${node.config?.right_value || ''}`;
+        else if (node.type === "knowledge") previewText = `TopK: ${node.config?.top_k || 2}`;
+        else if (node.type === "start") previewText = `全局启动入口`;
+        else if (node.type === "end") previewText = `最终输出呈现`;
+
+        nodeEl.innerHTML = `
+          <div class="flex items-center justify-between pb-2 border-b border-slate-100">
+            <div class="flex items-center space-x-2">
+              <span class="w-6 h-6 rounded-lg ${meta.color} text-white flex items-center justify-center text-xs shadow-sm">
+                <i class="fa-solid ${meta.icon}"></i>
+              </span>
+              <span class="text-xs font-bold text-slate-800 tracking-tight">${node.name}</span>
+            </div>
+            <span class="text-[10px] font-semibold px-1.5 py-0.5 rounded ${meta.badge}">${meta.label}</span>
+          </div>
+          <div class="mt-2 text-[11px] text-slate-500 font-mono truncate bg-slate-50 px-2 py-1 rounded border border-slate-100">
+            ${previewText}
+          </div>
+          <div id="node-status-badge-${node.id}" class="mt-2 flex items-center justify-between text-[10px] text-slate-400">
+            <span>ID: ${node.id}</span>
+            <span class="node-state-text">就绪</span>
+          </div>
+        `;
+
+        layer.appendChild(nodeEl);
+      });
+
+      // 绘制贝塞尔连接线
+      drawConnections();
+    }
+
+    // 拓扑层级计算函数
+    function calculateAutoLayout(wf) {
+      const positions = {};
+      const inDeg = {};
+      const graph = {};
+      wf.nodes.forEach(n => { inDeg[n.id] = 0; graph[n.id] = []; });
+      wf.edges.forEach(e => {
+        if (graph[e.source]) graph[e.source].push(e.target);
+        if (inDeg[e.target] !== undefined) inDeg[e.target]++;
+      });
+
+      // BFS 分层
+      const levels = {};
+      const queue = [];
+      wf.nodes.forEach(n => {
+        if (inDeg[n.id] === 0) {
+          queue.push({ id: n.id, level: 0 });
+          levels[n.id] = 0;
+        }
+      });
+
+      while (queue.length > 0) {
+        const { id, level } = queue.shift();
+        (graph[id] || []).forEach(childId => {
+          levels[childId] = Math.max(levels[childId] || 0, level + 1);
+          queue.push({ id: childId, level: level + 1 });
+        });
+      }
+
+      // 按照层级排列位置
+      const levelNodes = {};
+      Object.keys(levels).forEach(nid => {
+        const lvl = levels[nid];
+        if (!levelNodes[lvl]) levelNodes[lvl] = [];
+        levelNodes[lvl].push(nid);
+      });
+
+      Object.keys(levelNodes).forEach(lvl => {
+        const nids = levelNodes[lvl];
+        nids.forEach((nid, idx) => {
+          positions[nid] = {
+            x: 60 + parseInt(lvl) * 320,
+            y: 80 + idx * 160
+          };
+        });
+      });
+
+      return positions;
+    }
+
+    // 绘制贝塞尔曲线连线
+    function drawConnections() {
+      const svg = document.getElementById("connectionSvg");
+      // 保留 defs
+      const defs = svg.querySelector("defs").outerHTML;
+      let paths = defs;
+
+      if (!currentWorkflow || !currentWorkflow.edges) return;
+
+      currentWorkflow.edges.forEach(edge => {
+        const srcEl = document.getElementById(`node-${edge.source}`);
+        const dstEl = document.getElementById(`node-${edge.target}`);
+        if (!srcEl || !dstEl) return;
+
+        const x1 = srcEl.offsetLeft + srcEl.offsetWidth;
+        const y1 = srcEl.offsetTop + srcEl.offsetHeight / 2;
+        const x2 = dstEl.offsetLeft;
+        const y2 = dstEl.offsetTop + dstEl.offsetHeight / 2;
+
+        const dx = Math.abs(x2 - x1) * 0.5;
+        const pathData = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+
+        let strokeColor = "#94a3b8";
+        let marker = "url(#arrowhead)";
+
+        if (edge.branch === "true_branch") {
+          strokeColor = "#10b981";
+          marker = "url(#arrowhead-true)";
+        } else if (edge.branch === "false_branch") {
+          strokeColor = "#f59e0b";
+          marker = "url(#arrowhead-false)";
+        }
+
+        paths += `<path d="${pathData}" fill="none" stroke="${strokeColor}" stroke-width="2" marker-end="${marker}" stroke-dasharray="${edge.branch ? '4,4' : 'none'}" />`;
+      });
+
+      svg.innerHTML = paths;
+    }
+
+    // 动态生成运行入参表单
+    function renderDynamicInputs() {
+      const container = document.getElementById("dynamicInputsContainer");
+      container.innerHTML = "";
+
+      const startNode = (currentWorkflow?.nodes || []).find(n => n.type === "start");
+      const fields = startNode?.config?.fields || {};
+
+      if (Object.keys(fields).length === 0) {
+        container.innerHTML = `<div class="text-xs text-slate-400">无需额外运行参数</div>`;
+        return;
+      }
+
+      Object.keys(fields).forEach(fKey => {
+        const fMeta = fields[fKey];
+        const defaultVal = fMeta.default || "";
+        const label = fKey;
+
+        const fieldEl = document.createElement("div");
+        fieldEl.className = "space-y-1";
+        fieldEl.innerHTML = `
+          <label class="block text-xs font-semibold text-slate-700">${label}</label>
+          <input type="text" id="input_field_${fKey}" value="${defaultVal}" class="w-full text-xs px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition">
+        `;
+        container.appendChild(fieldEl);
+      });
+    }
+
+    // 执行工作流
+    async function runWorkflow() {
+      const runBtn = document.getElementById("runBtn");
+      const runIcon = document.getElementById("runIcon");
+      const runText = document.getElementById("runText");
+
+      // 提取输入入参
+      const startNode = (currentWorkflow?.nodes || []).find(n => n.type === "start");
+      const fields = startNode?.config?.fields || {};
+      const inputs = {};
+      Object.keys(fields).forEach(k => {
+        const el = document.getElementById(`input_field_${k}`);
+        if (el) inputs[k] = el.value;
+      });
+
+      // 启动状态与动画
+      runBtn.disabled = true;
+      runIcon.className = "fa-solid fa-spinner fa-spin text-[10px]";
+      runText.innerText = "执行调度中...";
+
+      // 重置节点状态样式
+      currentWorkflow.nodes.forEach(n => {
+        const el = document.getElementById(`node-${n.id}`);
+        if (el) {
+          el.className = el.className.replace(/border-(emerald|rose|amber)-500/g, "");
+          el.classList.add("node-running");
+        }
+      });
+
+      try {
+        const startTime = Date.now();
+        const res = await fetch("/api/workflow/run", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workflow: currentWorkflow, inputs: inputs })
+        });
+        const data = await res.json();
+        const duration = Date.now() - startTime;
+
+        if (data.success) {
+          currentTraces = data.traces || {};
+          renderTracesView(currentTraces, duration);
+          renderFinalResult(data.result);
+          switchInspectorTab("traces");
+        } else {
+          alert("工作流执行失败: " + data.error);
+        }
+      } catch (err) {
+        alert("请求异常: " + err);
+      } finally {
+        runBtn.disabled = false;
+        runIcon.className = "fa-solid fa-play text-[10px]";
+        runText.innerText = "运行工作流";
+
+        // 停止动画并标色
+        currentWorkflow.nodes.forEach(n => {
+          const el = document.getElementById(`node-${n.id}`);
+          if (el) el.classList.remove("node-running");
+        });
+      }
+    }
+
+    // 渲染全链路执行追溯
+    function renderTracesView(traces, totalMs) {
+      const container = document.getElementById("tracesTimeline");
+      container.innerHTML = "";
+
+      let successCount = 0;
+      let totalTokens = 0;
+
+      Object.keys(traces).forEach(nid => {
+        const t = traces[nid];
+        const node = (currentWorkflow?.nodes || []).find(n => n.id === nid);
+        const name = node ? node.name : nid;
+
+        if (t.status === "SUCCESS") successCount++;
+        totalTokens += (t.tokens || 0);
+
+        let badgeClass = "bg-slate-100 text-slate-600";
+        let statusIcon = "fa-clock";
+        if (t.status === "SUCCESS") { badgeClass = "bg-emerald-50 text-emerald-700 border border-emerald-200"; statusIcon = "fa-check"; }
+        else if (t.status === "SKIPPED") { badgeClass = "bg-amber-50 text-amber-700 border border-amber-200"; statusIcon = "fa-scissors"; }
+        else if (t.status === "FAILED") { badgeClass = "bg-rose-50 text-rose-700 border border-rose-200"; statusIcon = "fa-xmark"; }
+
+        // 同步画布上节点卡片的高亮颜色
+        const cardEl = document.getElementById(`node-${nid}`);
+        if (cardEl) {
+          const statusBadge = document.getElementById(`node-status-badge-${nid}`);
+          if (t.status === "SUCCESS") {
+            cardEl.style.borderColor = "#10b981";
+            if (statusBadge) statusBadge.innerHTML = `<span>ID: ${nid}</span><span class="text-emerald-600 font-bold"><i class="fa-solid fa-check mr-1"></i>${t.duration_ms}ms</span>`;
+          } else if (t.status === "SKIPPED") {
+            cardEl.style.borderColor = "#f59e0b";
+            cardEl.style.borderStyle = "dashed";
+            if (statusBadge) statusBadge.innerHTML = `<span>ID: ${nid}</span><span class="text-amber-500 font-medium"><i class="fa-solid fa-scissors mr-1"></i>已剪枝</span>`;
+          } else if (t.status === "FAILED") {
+            cardEl.style.borderColor = "#ef4444";
+            if (statusBadge) statusBadge.innerHTML = `<span>ID: ${nid}</span><span class="text-rose-600 font-bold"><i class="fa-solid fa-xmark mr-1"></i>失败</span>`;
+          }
+        }
+
+        const item = document.createElement("div");
+        item.className = "bg-slate-50 border border-slate-200/80 rounded-xl p-2.5 space-y-1.5 transition hover:bg-slate-100/60";
+        item.innerHTML = `
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-bold text-slate-800">${name}</span>
+            <span class="text-[10px] font-semibold px-2 py-0.5 rounded-full ${badgeClass}">
+              <i class="fa-solid ${statusIcon} mr-1"></i>${t.status} (${t.duration_ms}ms)
+            </span>
+          </div>
+          <div class="text-[10px] text-slate-400 font-mono">ID: ${nid} · Type: ${t.node_type}</div>
+          <details class="text-[11px] text-slate-600 cursor-pointer pt-1">
+            <summary class="hover:text-indigo-600 select-none">查看输出数据包</summary>
+            <pre class="mt-1 p-2 bg-slate-900 text-slate-100 rounded text-[10px] font-mono overflow-x-auto">${JSON.stringify(t.outputs || {}, null, 2)}</pre>
+          </details>
+        `;
+        container.appendChild(item);
+      });
+
+      document.getElementById("overallMetrics").innerText = `耗时: ${(totalMs/1000).toFixed(2)}s · 成功: ${successCount} · 消耗Tokens: ${totalTokens}`;
+    }
+
+    // 渲染最终输出 Markdown
+    function renderFinalResult(resultText) {
+      const container = document.getElementById("finalOutputContainer");
+      if (!resultText) {
+        container.innerHTML = `<div class="text-slate-400">无最终输出</div>`;
+        return;
+      }
+      container.innerHTML = marked.parse(resultText);
+    }
+
+    function resetTracesView() {
+      document.getElementById("tracesTimeline").innerHTML = `
+        <div class="text-center py-12 text-slate-400 text-xs">
+          <i class="fa-solid fa-circle-play text-2xl text-slate-300 mb-2 block"></i>
+          点击顶部「运行工作流」后在此查看全链路 Trace
+        </div>
+      `;
+      document.getElementById("finalOutputContainer").innerHTML = `
+        <div class="text-center py-12 text-slate-400">
+          <i class="fa-solid fa-file-waveform text-2xl text-slate-300 mb-2 block"></i>
+          工作流执行完成后在此渲染最终结果
+        </div>
+      `;
+      document.getElementById("overallMetrics").innerText = "等待工作流运行...";
+    }
+
+    function switchInspectorTab(tab) {
+      ['Inputs', 'Traces', 'Result'].forEach(t => {
+        document.getElementById(`tabContent${t}`).classList.add('hidden');
+        document.getElementById(`tabBtn${t}`).className = "px-3 py-1 text-xs font-medium rounded-md text-slate-600 hover:text-slate-900";
+      });
+      const activeContent = document.getElementById(`tabContent${tab.charAt(0).toUpperCase() + tab.slice(1)}`);
+      const activeBtn = document.getElementById(`tabBtn${tab.charAt(0).toUpperCase() + tab.slice(1)}`);
+      if (activeContent) activeContent.classList.remove('hidden');
+      if (activeBtn) activeBtn.className = "px-3 py-1 text-xs font-semibold rounded-md bg-white text-indigo-600 shadow-sm border border-slate-200/80";
+    }
+
+    // 节点属性配置弹窗
+    function openNodeDetail(nodeId) {
+      selectedNodeId = nodeId;
+      const node = (currentWorkflow?.nodes || []).find(n => n.id === nodeId);
+      if (!node) return;
+
+      const meta = NODE_TYPE_META[node.type] || { label: "自定义", icon: "fa-cube" };
+      document.getElementById("modalNodeTitle").innerText = `配置节点: ${node.name} (${node.id})`;
+      document.getElementById("modalNodeIcon").innerHTML = `<i class="fa-solid ${meta.icon}"></i>`;
+
+      const body = document.getElementById("modalNodeBody");
+      body.innerHTML = "";
+
+      // 通用名称配置
+      const nameRow = document.createElement("div");
+      nameRow.innerHTML = `
+        <label class="block text-xs font-semibold text-slate-700 mb-1">节点名称</label>
+        <input type="text" id="editNodeName" value="${node.name}" class="w-full text-xs px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg">
+      `;
+      body.appendChild(nameRow);
+
+      // 特定节点专属配置
+      if (node.type === "llm") {
+        const promptRow = document.createElement("div");
+        promptRow.innerHTML = `
+          <label class="block text-xs font-semibold text-slate-700 mb-1">Prompt 提示词模板 (支持 {{node.field}})</label>
+          <textarea id="editLlmPrompt" rows="5" class="w-full text-xs px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg font-mono">${node.config?.prompt || ''}</textarea>
+        `;
+        body.appendChild(promptRow);
+      } else if (node.type === "code") {
+        const codeRow = document.createElement("div");
+        codeRow.innerHTML = `
+          <label class="block text-xs font-semibold text-slate-700 mb-1">Python 脚本 main(inputs)</label>
+          <textarea id="editCodeContent" rows="6" class="w-full text-xs px-3 py-2 bg-slate-900 text-emerald-400 border border-slate-700 rounded-lg font-mono">${node.config?.code || ''}</textarea>
+        `;
+        body.appendChild(codeRow);
+      } else if (node.type === "condition") {
+        const condRow = document.createElement("div");
+        condRow.innerHTML = `
+          <label class="block text-xs font-semibold text-slate-700 mb-1">判断条件表达式</label>
+          <div class="grid grid-cols-3 gap-2">
+            <input type="text" id="editLeftVar" value="${node.config?.left_var || ''}" placeholder="左变量" class="text-xs px-2 py-1.5 bg-slate-50 border rounded">
+            <select id="editOp" class="text-xs px-2 py-1.5 bg-slate-50 border rounded">
+              <option value="==" ${node.config?.operator === '==' ? 'selected' : ''}>== (等于)</option>
+              <option value="!=" ${node.config?.operator === '!=' ? 'selected' : ''}>!= (不等于)</option>
+              <option value="contains" ${node.config?.operator === 'contains' ? 'selected' : ''}>contains (包含)</option>
+              <option value=">=" ${node.config?.operator === '>=' ? 'selected' : ''}>&gt;= (大于等于)</option>
+            </select>
+            <input type="text" id="editRightVal" value="${node.config?.right_value || ''}" placeholder="右值" class="text-xs px-2 py-1.5 bg-slate-50 border rounded">
+          </div>
+        `;
+        body.appendChild(condRow);
+      }
+
+      document.getElementById("nodeDetailModal").classList.remove("hidden");
+    }
+
+    function closeNodeDetailModal() {
+      document.getElementById("nodeDetailModal").classList.add("hidden");
+      selectedNodeId = null;
+    }
+
+    function saveNodeConfig() {
+      if (!selectedNodeId) return;
+      const node = (currentWorkflow?.nodes || []).find(n => n.id === selectedNodeId);
+      if (!node) return;
+
+      const newName = document.getElementById("editNodeName").value;
+      if (newName) node.name = newName;
+
+      if (node.type === "llm") {
+        node.config.prompt = document.getElementById("editLlmPrompt").value;
+      } else if (node.type === "code") {
+        node.config.code = document.getElementById("editCodeContent").value;
+      } else if (node.type === "condition") {
+        node.config.left_var = document.getElementById("editLeftVar").value;
+        node.config.operator = document.getElementById("editOp").value;
+        node.config.right_value = document.getElementById("editRightVal").value;
+      }
+
+      closeNodeDetailModal();
+      renderWorkflowCanvas();
+    }
+
+    function deleteCurrentNode() {
+      if (!selectedNodeId) return;
+      if (confirm(`确认删除节点 ${selectedNodeId} 吗？`)) {
+        currentWorkflow.nodes = currentWorkflow.nodes.filter(n => n.id !== selectedNodeId);
+        currentWorkflow.edges = currentWorkflow.edges.filter(e => e.source !== selectedNodeId && e.target !== selectedNodeId);
+        closeNodeDetailModal();
+        renderWorkflowCanvas();
+      }
+    }
+
+    function exportWorkflowJson() {
+      const str = JSON.stringify(currentWorkflow, null, 2);
+      const blob = new Blob([str], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${currentWorkflow.id || 'workflow'}.json`;
+      a.click();
+    }
+
+    function copyResultText() {
+      const text = document.getElementById("finalOutputContainer").innerText;
+      navigator.clipboard.writeText(text);
+      alert("最终结果已复制到剪贴板！");
+    }
+
+    function openAddNodeModal() {
+      alert("可通过导出 JSON 或编辑模板 DSL 自由扩展任意节点！系统内置 Start / End / LLM / Code / Condition / Tool / Knowledge 七大核心节点。");
+    }
+  </script>
+</body>
+</html>
