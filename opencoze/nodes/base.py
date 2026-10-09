@@ -18,8 +18,9 @@ class BaseNode:
         self.config = config or {}
 
     def resolve_config(self, context: ExecutionContext) -> Dict[str, Any]:
-        """使用当前上下文数据，自动解析 config 中包含的所有变量插值占位符"""
-        return VariableResolver.resolve(self.config, context.node_outputs)
+        """使用当前上下文数据，自动解析 config 中包含的所有变量插值占位符（过滤内部私有字段）"""
+        clean_cfg = {k: v for k, v in self.config.items() if not k.startswith("_")}
+        return VariableResolver.resolve(clean_cfg, context.node_outputs)
 
     async def execute(self, inputs: Dict[str, Any], context: ExecutionContext) -> Dict[str, Any]:
         """
