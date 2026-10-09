@@ -29,6 +29,20 @@
       user-select: none;
       touch-action: none;
     }
+    /* 连线端口悬浮与动效 */
+    .port-in, .port-out, .port-out-true, .port-out-false {
+      transition: transform 0.15s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.15s ease;
+    }
+    .port-in:hover, .port-out:hover, .port-out-true:hover, .port-out-false:hover {
+      transform: translateY(-50%) scale(1.3);
+      filter: drop-shadow(0 3px 6px rgba(99, 102, 241, 0.4));
+    }
+    /* 连线模式候选目标高亮效果 */
+    .node-candidate-target {
+      outline: 2px dashed #6366f1 !important;
+      outline-offset: 4px;
+      cursor: crosshair !important;
+    }
   </style>
 </head>
 <body class="bg-slate-50 text-slate-800 h-screen w-screen overflow-hidden flex flex-col font-sans">
@@ -99,6 +113,9 @@
     </div>
   </header>
 
+  <!-- 全局 Toast 提示容器 -->
+  <div id="toastContainer" class="fixed top-16 right-6 z-50 flex flex-col space-y-2 pointer-events-none"></div>
+
   <!-- 2. 主体工作区：左侧可视化画布 + 右侧执行追踪面板 -->
   <div class="flex-1 flex overflow-hidden relative">
 
@@ -108,7 +125,7 @@
       <svg id="connectionSvg" class="absolute inset-0 pointer-events-none w-[3500px] h-[3500px] z-0">
         <defs>
           <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
-            <polygon points="0 0, 8 3, 0 6" fill="#94a3b8" />
+            <polygon points="0 0, 8 3, 0 6" fill="#6366f1" />
           </marker>
           <marker id="arrowhead-true" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
             <polygon points="0 0, 8 3, 0 6" fill="#10b981" />
@@ -117,10 +134,25 @@
             <polygon points="0 0, 8 3, 0 6" fill="#f59e0b" />
           </marker>
         </defs>
+        <!-- 动态临时连线路径 -->
+        <path id="tempConnectionLine" class="hidden pointer-events-none" fill="none" stroke="#6366f1" stroke-width="2.5" stroke-dasharray="6,4" marker-end="url(#arrowhead)" />
       </svg>
 
-      <!-- 节点卡片容器 -->
-      <div id="nodesLayer" class="relative w-[3500px] h-[3500px] z-10"></div>
+      <!-- 节点卡片容器 (pointer-events-none 允许鼠标穿透空白区域点击 SVG 连线) -->
+      <div id="nodesLayer" class="relative w-[3500px] h-[3500px] z-10 pointer-events-none"></div>
+    </div>
+
+    <!-- 画布底部操作悬浮提示条 (Canvas Hint Bar) -->
+    <div id="canvasHintBar" class="absolute bottom-4 left-4 z-30 pointer-events-auto bg-white/95 backdrop-blur-md px-4 py-2.5 rounded-xl shadow-lg border border-slate-200/90 flex items-center space-x-3 text-xs text-slate-600 transition-all select-none">
+      <div id="canvasHintPulse" class="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse shrink-0"></div>
+      <div id="canvasHintText" class="truncate max-w-[560px]">
+        <span class="font-bold text-slate-800">画布连线指南:</span> 
+        按住节点右侧圆点 <span class="inline-block w-2.5 h-2.5 rounded-full bg-indigo-500 align-middle"></span> 拖拽至下游节点即可连线；鼠标悬停连线可点击 <span class="inline-block px-1 bg-red-100 text-red-600 font-bold rounded text-[10px]">✕</span> 删除。
+      </div>
+      <button id="btnCancelConnect" onclick="cancelConnectingMode()" class="hidden px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold transition flex items-center space-x-1 shrink-0">
+        <i class="fa-solid fa-xmark text-[10px]"></i>
+        <span>取消连线 (ESC)</span>
+      </button>
     </div>
 
     <!-- B. 右侧调试与运行追踪抽屉 (Run Inspector Drawer) -->
@@ -399,6 +431,20 @@
     let dragStartX = 0, dragStartY = 0;
     let nodeStartX = 0, nodeStartY = 0;
 
+    // 交互式连线状态（支持拖拽连线 + 点击选择下游连线）
+    let connectingState = {
+      active: false,
+      sourceNodeId: null,
+      branch: null,
+      startX: 0,
+      startY: 0
+    };
+    let connectingMode = {
+      active: false,
+      sourceNodeId: null,
+      branch: null
+    };
+
     const NODE_TYPE_META = {
       start: { label: "开始输入", icon: "fa-play", color: "bg-emerald-500", border: "border-emerald-200", badge: "bg-emerald-50 text-emerald-700" },
       end: { label: "结果输出", icon: "fa-flag-checkered", color: "bg-rose-500", border: "border-rose-200", badge: "bg-rose-50 text-rose-700" },
@@ -413,6 +459,18 @@
       await fetchSystemInfo();
       await fetchTemplatesList();
       await loadSelectedTemplate();
+
+      // 画布空白区域点击与全局 ESC 取消连线模式
+      document.getElementById("canvasContainer").addEventListener("click", (e) => {
+        if (e.target.id === "canvasContainer" || e.target.id === "nodesLayer") {
+          cancelConnectingMode();
+        }
+      });
+      window.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+          cancelConnectingMode();
+        }
+      });
     });
 
     async function fetchSystemInfo() {
@@ -463,20 +521,57 @@
       } catch (e) { alert("加载模板失败: " + e); }
     }
 
-    // 画布渲染逻辑（支持拖拽定位）
+    // 准确计算端口在画布容器内的绝对坐标 (考虑滚动与视口)
+    function getPortCanvasCoord(nodeId, portType, branch) {
+      const nodeEl = document.getElementById(`node-${nodeId}`);
+      if (!nodeEl) return null;
+
+      let portEl = null;
+      if (portType === "input") {
+        portEl = nodeEl.querySelector(".port-in");
+      } else {
+        if (branch === "true_branch") {
+          portEl = nodeEl.querySelector(".port-out-true");
+        } else if (branch === "false_branch") {
+          portEl = nodeEl.querySelector(".port-out-false");
+        }
+        if (!portEl) {
+          portEl = nodeEl.querySelector(".port-out");
+        }
+      }
+
+      const canvas = document.getElementById("canvasContainer");
+      const canvasRect = canvas.getBoundingClientRect();
+
+      if (portEl) {
+        const elRect = portEl.getBoundingClientRect();
+        return {
+          x: elRect.left - canvasRect.left + canvas.scrollLeft + elRect.width / 2,
+          y: elRect.top - canvasRect.top + canvas.scrollTop + elRect.height / 2
+        };
+      }
+
+      // 降级使用卡片自身边界
+      const nodeRect = nodeEl.getBoundingClientRect();
+      const fallbackX = portType === "input"
+        ? (nodeRect.left - canvasRect.left + canvas.scrollLeft)
+        : (nodeRect.right - canvasRect.left + canvas.scrollLeft);
+      const fallbackY = nodeRect.top - canvasRect.top + canvas.scrollTop + nodeRect.height / 2;
+      return { x: fallbackX, y: fallbackY };
+    }
+
+    // 画布渲染逻辑（支持拖拽定位 + 端口桩呈现）
     function renderWorkflowCanvas() {
       const layer = document.getElementById("nodesLayer");
       layer.innerHTML = "";
 
       if (!currentWorkflow || !currentWorkflow.nodes) return;
 
-      // 如果节点尚未具备坐标，自动分配拓扑坐标
       const layoutPositions = calculateAutoLayout(currentWorkflow);
 
       currentWorkflow.nodes.forEach(node => {
         const meta = NODE_TYPE_META[node.type] || { label: "自定义", icon: "fa-cube", color: "bg-slate-600", border: "border-slate-200", badge: "bg-slate-50 text-slate-700" };
         
-        // 优先使用节点保存的 x, y，没有则用拓扑排版
         const posX = node.x !== undefined ? node.x : (layoutPositions[node.id]?.x || 60);
         const posY = node.y !== undefined ? node.y : (layoutPositions[node.id]?.y || 120);
         node.x = posX;
@@ -484,11 +579,11 @@
 
         const nodeEl = document.createElement("div");
         nodeEl.id = `node-${node.id}`;
-        nodeEl.className = `node-card absolute w-64 bg-white rounded-xl shadow-md border ${meta.border} p-3 cursor-move z-10 hover:shadow-lg transition-shadow`;
+        nodeEl.className = `node-card absolute w-64 bg-white rounded-xl shadow-md border ${meta.border} p-3 cursor-move z-10 hover:shadow-lg transition-shadow pointer-events-auto group/card`;
         nodeEl.style.left = `${posX}px`;
         nodeEl.style.top = `${posY}px`;
 
-        // 绑定拖拽事件
+        // 绑定拖拽事件与连线模式命中
         nodeEl.onmousedown = (e) => startDragNode(e, node.id);
 
         let previewText = "";
@@ -500,7 +595,66 @@
         else if (node.type === "end") previewText = `最终输出呈现`;
         else if (node.type === "tool") previewText = `Action: ${node.config?.tool_action || 'http'}`;
 
+        // 构建输入/输出端口锚点
+        let portsHtml = "";
+
+        // 1. 输入端口（非 start 节点均具备）
+        if (node.type !== "start") {
+          portsHtml += `
+            <div class="port-in absolute -left-3 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full bg-white border-2 border-slate-400 hover:border-indigo-600 flex items-center justify-center cursor-pointer shadow-md z-30 group/pin"
+                 data-node-id="${node.id}"
+                 data-port-type="input"
+                 title="【输入端口】点击此桩完成连线，或将连线拖入此处"
+                 onclick="event.stopPropagation(); handlePortClick('${node.id}', 'input', null)">
+              <div class="w-2 h-2 rounded-full bg-slate-400 group-hover/pin:bg-indigo-600 transition-colors pointer-events-none"></div>
+            </div>
+          `;
+        }
+
+        // 2. 输出端口
+        if (node.type === "condition") {
+          // 条件分支：True 分支端口 + False 分支端口
+          portsHtml += `
+            <div class="port-out-true absolute -right-3 top-[32%] -translate-y-1/2 w-6 h-6 rounded-full bg-emerald-500 border-2 border-white flex items-center justify-center cursor-crosshair shadow-md z-30 group/ptrue"
+                 data-node-id="${node.id}"
+                 data-branch="true_branch"
+                 title="【True 分支端口】条件满足时执行，按住拖拽连线下游，或点击后选择下游"
+                 onmousedown="event.stopPropagation(); startPortDrag(event, '${node.id}', 'true_branch')"
+                 onclick="event.stopPropagation(); handlePortClick('${node.id}', 'output', 'true_branch')">
+              <i class="fa-solid fa-check text-[9px] text-white pointer-events-none"></i>
+              <span class="absolute left-7 bg-emerald-50 border border-emerald-300 text-emerald-800 text-[10px] font-bold px-1.5 py-0.5 rounded shadow-sm whitespace-nowrap pointer-events-none opacity-85 group-hover/ptrue:opacity-100 transition-opacity">
+                True
+              </span>
+            </div>
+
+            <div class="port-out-false absolute -right-3 top-[68%] -translate-y-1/2 w-6 h-6 rounded-full bg-amber-500 border-2 border-white flex items-center justify-center cursor-crosshair shadow-md z-30 group/pfalse"
+                 data-node-id="${node.id}"
+                 data-branch="false_branch"
+                 title="【False 分支端口】条件不满足时执行，按住拖拽连线下游，或点击后选择下游"
+                 onmousedown="event.stopPropagation(); startPortDrag(event, '${node.id}', 'false_branch')"
+                 onclick="event.stopPropagation(); handlePortClick('${node.id}', 'output', 'false_branch')">
+              <i class="fa-solid fa-xmark text-[9px] text-white pointer-events-none"></i>
+              <span class="absolute left-7 bg-amber-50 border border-amber-300 text-amber-800 text-[10px] font-bold px-1.5 py-0.5 rounded shadow-sm whitespace-nowrap pointer-events-none opacity-85 group-hover/pfalse:opacity-100 transition-opacity">
+                False
+              </span>
+            </div>
+          `;
+        } else if (node.type !== "end") {
+          // 普通单输出端口
+          portsHtml += `
+            <div class="port-out absolute -right-3 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full bg-indigo-600 border-2 border-white flex items-center justify-center cursor-crosshair shadow-md z-30 group/pout"
+                 data-node-id="${node.id}"
+                 data-port-type="output"
+                 title="【输出端口】按住拖拽连线至下游节点，或点击后选择下游节点"
+                 onmousedown="event.stopPropagation(); startPortDrag(event, '${node.id}', null)"
+                 onclick="event.stopPropagation(); handlePortClick('${node.id}', 'output', null)">
+              <div class="w-2 h-2 rounded-full bg-white pointer-events-none"></div>
+            </div>
+          `;
+        }
+
         nodeEl.innerHTML = `
+          ${portsHtml}
           <div class="flex items-center justify-between pb-2 border-b border-slate-100">
             <div class="flex items-center space-x-2">
               <span class="w-6 h-6 rounded-lg ${meta.color} text-white flex items-center justify-center text-xs shadow-sm">
@@ -527,9 +681,19 @@
       drawConnections();
     }
 
-    // 节点拖拽移动逻辑
+    // 节点卡片拖拽移动逻辑
     function startDragNode(e, nodeId) {
       if (e.target.tagName.toLowerCase() === 'button' || e.target.closest('button')) return;
+      if (e.target.closest('.port-in') || e.target.closest('.port-out') || e.target.closest('.port-out-true') || e.target.closest('.port-out-false')) return;
+
+      // 如果当前处于点击连线模式中，点击卡片即作为下游目标完成连线！
+      if (connectingMode.active) {
+        e.stopPropagation();
+        attemptCreateEdge(connectingMode.sourceNodeId, nodeId, connectingMode.branch);
+        cancelConnectingMode(false);
+        return;
+      }
+
       draggedNodeId = nodeId;
       dragStartX = e.clientX;
       dragStartY = e.clientY;
@@ -609,42 +773,352 @@
       return positions;
     }
 
-    // 绘制贝塞尔曲线连线
+    // 绘制贝塞尔曲线连线（包含隐形判定区、中点分支徽标与悬浮删除按钮）
     function drawConnections() {
       const svg = document.getElementById("connectionSvg");
       const defs = svg.querySelector("defs").outerHTML;
       let paths = defs;
 
-      if (!currentWorkflow || !currentWorkflow.edges) return;
+      paths += `<path id="tempConnectionLine" class="hidden pointer-events-none" fill="none" stroke="#6366f1" stroke-width="2.5" stroke-dasharray="6,4" marker-end="url(#arrowhead)" />`;
+
+      if (!currentWorkflow || !currentWorkflow.edges) {
+        svg.innerHTML = paths;
+        return;
+      }
 
       currentWorkflow.edges.forEach(edge => {
-        const srcEl = document.getElementById(`node-${edge.source}`);
-        const dstEl = document.getElementById(`node-${edge.target}`);
-        if (!srcEl || !dstEl) return;
+        const srcCoord = getPortCanvasCoord(edge.source, 'output', edge.branch);
+        const dstCoord = getPortCanvasCoord(edge.target, 'input');
+        if (!srcCoord || !dstCoord) return;
 
-        const x1 = srcEl.offsetLeft + srcEl.offsetWidth;
-        const y1 = srcEl.offsetTop + srcEl.offsetHeight / 2;
-        const x2 = dstEl.offsetLeft;
-        const y2 = dstEl.offsetTop + dstEl.offsetHeight / 2;
+        const x1 = srcCoord.x;
+        const y1 = srcCoord.y;
+        const x2 = dstCoord.x;
+        const y2 = dstCoord.y;
 
-        const dx = Math.abs(x2 - x1) * 0.5;
+        const dx = Math.max(36, Math.abs(x2 - x1) * 0.5);
         const pathData = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
 
-        let strokeColor = "#94a3b8";
+        let strokeColor = "#6366f1";
         let marker = "url(#arrowhead)";
+        let branchLabel = "";
 
         if (edge.branch === "true_branch") {
           strokeColor = "#10b981";
           marker = "url(#arrowhead-true)";
+          branchLabel = "True";
         } else if (edge.branch === "false_branch") {
           strokeColor = "#f59e0b";
           marker = "url(#arrowhead-false)";
+          branchLabel = "False";
         }
 
-        paths += `<path d="${pathData}" fill="none" stroke="${strokeColor}" stroke-width="2" marker-end="${marker}" stroke-dasharray="${edge.branch ? '4,4' : 'none'}" />`;
+        // 计算贝塞尔曲线中点 (t = 0.5)
+        const p0x = x1, p0y = y1;
+        const p1x = x1 + dx, p1y = y1;
+        const p2x = x2 - dx, p2y = y2;
+        const p3x = x2, p3y = y2;
+        const midX = 0.125 * p0x + 0.375 * p1x + 0.375 * p2x + 0.125 * p3x;
+        const midY = 0.125 * p0y + 0.375 * p1y + 0.375 * p2y + 0.125 * p3y;
+
+        paths += `
+          <g class="edge-group cursor-pointer group" data-source="${edge.source}" data-target="${edge.target}">
+            <!-- 隐形加粗判定区，极大提升鼠标悬浮与点击灵敏度 -->
+            <path d="${pathData}" fill="none" stroke="transparent" stroke-width="22" class="pointer-events-auto" 
+                  onclick="event.stopPropagation(); deleteEdgeDirectly('${edge.source}', '${edge.target}')" />
+
+            <!-- 贝塞尔连线实体 -->
+            <path d="${pathData}" fill="none" stroke="${strokeColor}" stroke-width="2.5" marker-end="${marker}" 
+                  stroke-dasharray="${edge.branch ? '5,4' : 'none'}" 
+                  class="edge-line pointer-events-none group-hover:stroke-indigo-600 transition-colors" />
+
+            <!-- 曲线中点标记与快捷删除按钮 -->
+            <g transform="translate(${midX}, ${midY})" class="pointer-events-auto select-none" onclick="event.stopPropagation(); deleteEdgeDirectly('${edge.source}', '${edge.target}')">
+              ${branchLabel ? `
+                <rect x="-18" y="-10" width="36" height="20" rx="10" fill="${edge.branch === 'true_branch' ? '#d1fae5' : '#fef3c7'}" stroke="${strokeColor}" stroke-width="1.5" class="group-hover:hidden shadow-sm" />
+                <text x="0" y="4" text-anchor="middle" font-size="10" font-weight="bold" fill="${edge.branch === 'true_branch' ? '#065f46' : '#92400e'}" class="group-hover:hidden">${branchLabel}</text>
+              ` : `
+                <circle cx="0" cy="0" r="4.5" fill="#cbd5e1" class="group-hover:hidden" />
+              `}
+              <!-- 悬浮时显现的红色删除按钮 -->
+              <g class="hidden group-hover:block transition-all" title="点击删除此连线">
+                <circle cx="0" cy="0" r="10" fill="#ef4444" stroke="#ffffff" stroke-width="2" class="shadow-lg" />
+                <text x="0" y="3.5" text-anchor="middle" font-size="10" font-weight="extrabold" fill="#ffffff">✕</text>
+              </g>
+            </g>
+          </g>
+        `;
       });
 
       svg.innerHTML = paths;
+    }
+
+    // ------------------------------------------
+    // 端口连线交互逻辑 (拖拽连线 + 点击选择连线)
+    // ------------------------------------------
+    function startPortDrag(e, nodeId, branch) {
+      e.stopPropagation();
+      e.preventDefault();
+
+      cancelConnectingMode(false);
+
+      const startCoord = getPortCanvasCoord(nodeId, 'output', branch);
+      if (!startCoord) return;
+
+      connectingState = {
+        active: true,
+        sourceNodeId: nodeId,
+        branch: branch || null,
+        startX: startCoord.x,
+        startY: startCoord.y
+      };
+
+      updateCanvasHint(true, nodeId, branch);
+
+      window.addEventListener("mousemove", onConnectingMouseMove);
+      window.addEventListener("mouseup", onConnectingMouseUp);
+    }
+
+    function onConnectingMouseMove(e) {
+      if (!connectingState.active) return;
+
+      const canvas = document.getElementById("canvasContainer");
+      const canvasRect = canvas.getBoundingClientRect();
+      const mx = e.clientX - canvasRect.left + canvas.scrollLeft;
+      const my = e.clientY - canvasRect.top + canvas.scrollTop;
+
+      const tempLine = document.getElementById("tempConnectionLine");
+      if (!tempLine) return;
+
+      const x1 = connectingState.startX;
+      const y1 = connectingState.startY;
+      const dx = Math.max(36, Math.abs(mx - x1) * 0.5);
+      const pathData = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${mx - dx} ${my}, ${mx} ${my}`;
+
+      tempLine.setAttribute("d", pathData);
+      tempLine.classList.remove("hidden");
+
+      if (connectingState.branch === "true_branch") {
+        tempLine.setAttribute("stroke", "#10b981");
+        tempLine.setAttribute("marker-end", "url(#arrowhead-true)");
+      } else if (connectingState.branch === "false_branch") {
+        tempLine.setAttribute("stroke", "#f59e0b");
+        tempLine.setAttribute("marker-end", "url(#arrowhead-false)");
+      } else {
+        tempLine.setAttribute("stroke", "#6366f1");
+        tempLine.setAttribute("marker-end", "url(#arrowhead)");
+      }
+    }
+
+    function onConnectingMouseUp(e) {
+      if (!connectingState.active) return;
+
+      const srcNodeId = connectingState.sourceNodeId;
+      const branch = connectingState.branch;
+
+      window.removeEventListener("mousemove", onConnectingMouseMove);
+      window.removeEventListener("mouseup", onConnectingMouseUp);
+
+      const tempLine = document.getElementById("tempConnectionLine");
+      if (tempLine) tempLine.classList.add("hidden");
+
+      // 通过 elementFromPoint 检测鼠标落点
+      const hitEl = document.elementFromPoint(e.clientX, e.clientY);
+      let targetNodeId = null;
+
+      if (hitEl) {
+        const portIn = hitEl.closest(".port-in");
+        if (portIn) {
+          targetNodeId = portIn.getAttribute("data-node-id");
+        } else {
+          const card = hitEl.closest(".node-card");
+          if (card) {
+            targetNodeId = card.id.replace("node-", "");
+          }
+        }
+      }
+
+      if (targetNodeId && targetNodeId !== srcNodeId) {
+        attemptCreateEdge(srcNodeId, targetNodeId, branch);
+      }
+
+      connectingState.active = false;
+      updateCanvasHint(false);
+    }
+
+    function handlePortClick(nodeId, portType, branch) {
+      if (portType === "output") {
+        if (connectingMode.active && connectingMode.sourceNodeId === nodeId && connectingMode.branch === branch) {
+          cancelConnectingMode();
+          return;
+        }
+
+        connectingMode = {
+          active: true,
+          sourceNodeId: nodeId,
+          branch: branch || null
+        };
+
+        updateCanvasHint(true, nodeId, branch);
+        highlightCandidateTargets(nodeId);
+        showToast("🔗 已选择连线起点，请点击下游目标节点完成连线 (ESC取消)", "info");
+      } else if (portType === "input") {
+        if (connectingMode.active) {
+          attemptCreateEdge(connectingMode.sourceNodeId, nodeId, connectingMode.branch);
+          cancelConnectingMode(false);
+        }
+      }
+    }
+
+    function highlightCandidateTargets(srcNodeId) {
+      currentWorkflow.nodes.forEach(n => {
+        const el = document.getElementById(`node-${n.id}`);
+        if (!el) return;
+        if (n.id !== srcNodeId && n.type !== "start") {
+          el.classList.add("node-candidate-target");
+        } else {
+          el.classList.remove("node-candidate-target");
+        }
+      });
+    }
+
+    function cancelConnectingMode(showNotice = true) {
+      if (connectingMode.active && showNotice) {
+        showToast("已退出连线模式", "info");
+      }
+      connectingMode.active = false;
+      connectingMode.sourceNodeId = null;
+      connectingMode.branch = null;
+
+      currentWorkflow?.nodes?.forEach(n => {
+        const el = document.getElementById(`node-${n.id}`);
+        if (el) el.classList.remove("node-candidate-target");
+      });
+
+      updateCanvasHint(false);
+    }
+
+    function updateCanvasHint(isConnecting, srcNodeId = null, branch = null) {
+      const hintEl = document.getElementById("canvasHintText");
+      const cancelBtn = document.getElementById("btnCancelConnect");
+      const pulse = document.getElementById("canvasHintPulse");
+      if (!hintEl) return;
+
+      if (isConnecting) {
+        const srcNode = currentWorkflow?.nodes?.find(n => n.id === srcNodeId);
+        const srcName = srcNode ? srcNode.name : srcNodeId;
+        let branchDesc = "";
+        if (branch === "true_branch") branchDesc = " [True分支]";
+        else if (branch === "false_branch") branchDesc = " [False分支]";
+
+        pulse.className = "w-2.5 h-2.5 rounded-full bg-indigo-600 animate-ping shrink-0";
+        hintEl.innerHTML = `
+          <span class="font-bold text-indigo-600">正在连线:</span> 
+          已选择起始节点 <span class="font-bold text-slate-800 underline decoration-indigo-500">${srcName}</span>${branchDesc} ➔ 
+          <span class="text-slate-700">请点击或释放至下游目标节点完成连线</span>
+        `;
+        if (cancelBtn) cancelBtn.classList.remove("hidden");
+      } else {
+        pulse.className = "w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse shrink-0";
+        hintEl.innerHTML = `
+          <span class="font-bold text-slate-800">画布连线指南:</span> 
+          按住节点右侧圆点 <span class="inline-block w-2.5 h-2.5 rounded-full bg-indigo-500 align-middle"></span> 拖拽至下游节点即可连线；鼠标悬停连线可点击 <span class="inline-block px-1 bg-red-100 text-red-600 font-bold rounded text-[10px]">✕</span> 删除。
+        `;
+        if (cancelBtn) cancelBtn.classList.add("hidden");
+      }
+    }
+
+    function attemptCreateEdge(srcId, dstId, branch) {
+      if (!srcId || !dstId) return false;
+      if (srcId === dstId) {
+        showToast("⚠️ 不能连接节点到自身！", "warning");
+        return false;
+      }
+
+      const srcNode = currentWorkflow.nodes.find(n => n.id === srcId);
+      const dstNode = currentWorkflow.nodes.find(n => n.id === dstId);
+      if (!srcNode || !dstNode) return false;
+
+      if (dstNode.type === "start") {
+        showToast("⚠️ 「开始输入」节点为工作流入口，不能作为下游节点！", "warning");
+        return false;
+      }
+
+      const exists = currentWorkflow.edges.some(e => 
+        e.source === srcId && e.target === dstId && (e.branch || null) === (branch || null)
+      );
+      if (exists) {
+        showToast("⚠️ 该连线已经存在！", "warning");
+        return false;
+      }
+
+      const reverseExists = currentWorkflow.edges.some(e => e.source === dstId && e.target === srcId);
+      if (reverseExists) {
+        showToast("⚠️ 工作流为有向无环图 (DAG)，不能与直接下游形成回环！", "warning");
+        return false;
+      }
+
+      const newEdge = { source: srcId, target: dstId };
+      if (branch) newEdge.branch = branch;
+
+      currentWorkflow.edges.push(newEdge);
+      drawConnections();
+
+      if (selectedNodeId === srcId) {
+        renderOutgoingEdgesList(srcId);
+      }
+
+      const branchText = branch === "true_branch" ? " (True分支)" : branch === "false_branch" ? " (False分支)" : "";
+      showToast(`🎉 连线成功：${srcNode.name} ➔ ${dstNode.name}${branchText}`, "success");
+      return true;
+    }
+
+    function deleteEdgeDirectly(srcId, dstId) {
+      const srcNode = currentWorkflow.nodes.find(n => n.id === srcId);
+      const dstNode = currentWorkflow.nodes.find(n => n.id === dstId);
+      const srcName = srcNode ? srcNode.name : srcId;
+      const dstName = dstNode ? dstNode.name : dstId;
+
+      currentWorkflow.edges = currentWorkflow.edges.filter(e => !(e.source === srcId && e.target === dstId));
+      drawConnections();
+
+      if (selectedNodeId === srcId) {
+        renderOutgoingEdgesList(srcId);
+      }
+      showToast(`🗑️ 已删除连线：${srcName} ➔ ${dstName}`, "info");
+    }
+
+    function showToast(message, type = 'info') {
+      const container = document.getElementById("toastContainer");
+      if (!container) return;
+
+      const toast = document.createElement("div");
+      let bgClass = "bg-slate-800 text-white";
+      let icon = "fa-circle-info";
+
+      if (type === "success") {
+        bgClass = "bg-emerald-600 text-white";
+        icon = "fa-check";
+      } else if (type === "warning") {
+        bgClass = "bg-amber-500 text-white";
+        icon = "fa-triangle-exclamation";
+      } else if (type === "error") {
+        bgClass = "bg-rose-600 text-white";
+        icon = "fa-circle-xmark";
+      }
+
+      toast.className = `${bgClass} px-4 py-2.5 rounded-xl shadow-xl text-xs font-semibold flex items-center space-x-2 pointer-events-auto transform transition-all duration-300 translate-y-2 opacity-0`;
+      toast.innerHTML = `<i class="fa-solid ${icon}"></i><span>${message}</span>`;
+
+      container.appendChild(toast);
+      requestAnimationFrame(() => {
+        toast.classList.remove("translate-y-2", "opacity-0");
+      });
+
+      setTimeout(() => {
+        toast.classList.add("opacity-0", "translate-y-2");
+        setTimeout(() => toast.remove(), 300);
+      }, 2500);
     }
 
     // ==========================================
@@ -993,29 +1467,16 @@
 
     function addNewEdgeFromCurrent() {
       const targetId = document.getElementById("newEdgeTarget").value;
-      if (!targetId) { alert("请先选择下游目标节点！"); return; }
+      if (!targetId) { showToast("请先选择下游目标节点！", "warning"); return; }
 
       const branchEl = document.getElementById("newEdgeBranch");
       const branchVal = branchEl ? branchEl.value : undefined;
 
-      // 避免重复连线
-      const exists = currentWorkflow.edges.some(e => e.source === selectedNodeId && e.target === targetId);
-      if (exists) { alert("两节点间已存在连接！"); return; }
-
-      currentWorkflow.edges.push({
-        source: selectedNodeId,
-        target: targetId,
-        branch: branchVal
-      });
-
-      renderOutgoingEdgesList(selectedNodeId);
-      drawConnections();
+      attemptCreateEdge(selectedNodeId, targetId, branchVal);
     }
 
     function removeEdge(src, dst) {
-      currentWorkflow.edges = currentWorkflow.edges.filter(e => !(e.source === src && e.target === dst));
-      renderOutgoingEdgesList(selectedNodeId);
-      drawConnections();
+      deleteEdgeDirectly(src, dst);
     }
 
     function closeNodeDetailModal() {

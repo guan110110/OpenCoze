@@ -1,0 +1,54 @@
+{
+  "id": "wf_2cc47324",
+  "name": "测试流程",
+  "description": "测试流程",
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "name": "开始输入",
+      "config": {
+        "fields": {
+          "input_text": {
+            "type": "string",
+            "default": "请为我的新产品起一个好听的名字"
+          }
+        }
+      },
+      "x": 60,
+      "y": 80
+    },
+    {
+      "id": "llm_1",
+      "type": "llm",
+      "name": "大模型处理",
+      "config": {
+        "model": "glm-4-flash",
+        "system": "你是一个充满创意和商业洞察力的品牌起名大师。",
+        "prompt": "请基于用户的需求【{{start.input_text}}】，构思 3 个好听、有寓意的品牌名并附上命名理由："
+      },
+      "x": 380,
+      "y": 80
+    },
+    {
+      "id": "end",
+      "type": "end",
+      "name": "结果呈现",
+      "config": {
+        "response": "### 💡 智能品牌命名建议\n\n{{llm_1.text}}"
+      },
+      "x": 700,
+      "y": 80
+    }
+  ],
+  "edges": [
+    {
+      "source": "start",
+      "target": "llm_1"
+    },
+    {
+      "source": "llm_1",
+      "target": "end"
+    }
+  ]
+}
